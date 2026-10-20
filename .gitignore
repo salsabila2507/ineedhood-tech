@@ -1,0 +1,16 @@
+node_modules
+dist
+dist-ssr
+/data
+/logs
+/runs
+/workspace
+/staging
+/skills
+/apps
+/bin
+*.log
+.env
+.env.*
+.instabox-key
+.DS_Store

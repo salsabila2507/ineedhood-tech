@@ -1,0 +1,25 @@
+#!/bin/bash
+set -euo pipefail
+PROMPT="${1:-image}"
+SIZE="${2:-1024x1024}"
+MODEL="${IMAGE_MODEL:-ig}"
+KEY="${IMAGE_KEY:-}"
+URL="${IMAGE_GATEWAY:-https://je.jerouter.web.id/v1}"
+OUT="${3:-image.jpg}"
+[ -z "$KEY" ] && { echo "IMAGE_KEY not set" >&2; exit 2; }
+
+res=$(curl -s -X POST "$URL/images/generations" \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"$MODEL\",\"prompt\":\"$PROMPT\",\"n\":1,\"size\":\"$SIZE\"}")
+echo "$res" | python3 -c '
+import json,sys,base64
+d=json.load(sys.stdin)
+data=d.get("data",[{}])[0]
+b=data.get("b64_json","")
+if not b:
+    sys.stderr.write("no image data: "+json.dumps(d)+"\n")
+    sys.exit(1)
+sys.stdout.buffer.write(base64.b64decode(b))
+' > "$OUT"
+echo "$OUT generated"
