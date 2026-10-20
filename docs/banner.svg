@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="ineedhood tech, a 3D office for AI agents">
+  <defs>
+    <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#33241a"/>
+      <stop offset="0.55" stop-color="#221810"/>
+      <stop offset="1" stop-color="#170f0a"/>
+    </linearGradient>
+    <linearGradient id="kraft" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a97c43"/>
+      <stop offset="0.28" stop-color="#d8aa68"/>
+      <stop offset="0.62" stop-color="#c99a58"/>
+      <stop offset="1" stop-color="#8f6634"/>
+    </linearGradient>
+    <radialGradient id="wax" cx="0.34" cy="0.28" r="0.85">
+      <stop offset="0" stop-color="#d8503f"/>
+      <stop offset="0.55" stop-color="#a8291f"/>
+      <stop offset="1" stop-color="#74170f"/>
+    </radialGradient>
+    <radialGradient id="ember" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffb066" stop-opacity="0.5"/>
+      <stop offset="0.55" stop-color="#f0a35e" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#f0a35e" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pool" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#e8b26a" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#e8b26a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#000000" stop-opacity="0.55"/>
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="soft" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+    <filter id="soft2" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="320" fill="url(#wood)"/>
+
+  <!-- vertical grain -->
+  <g stroke="#ffffff" stroke-opacity="0.022" stroke-width="1">
+    <line x1="60" y1="10" x2="60" y2="310"/><line x1="128" y1="10" x2="128" y2="310"/>
+    <line x1="196" y1="10" x2="196" y2="310"/><line x1="262" y1="10" x2="262" y2="310"/>
+    <line x1="330" y1="10" x2="330" y2="310"/><line x1="398" y1="10" x2="398" y2="310"/>
+    <line x1="466" y1="10" x2="466" y2="310"/><line x1="534" y1="10" x2="534" y2="310"/>
+    <line x1="602" y1="10" x2="602" y2="310"/><line x1="670" y1="10" x2="670" y2="310"/>
+    <line x1="738" y1="10" x2="738" y2="310"/><line x1="806" y1="10" x2="806" y2="310"/>
+    <line x1="874" y1="10" x2="874" y2="310"/><line x1="942" y1="10" x2="942" y2="310"/>
+    <line x1="1010" y1="10" x2="1010" y2="310"/><line x1="1078" y1="10" x2="1078" y2="310"/>
+    <line x1="1146" y1="10" x2="1146" y2="310"/><line x1="1214" y1="10" x2="1214" y2="310"/>
+  </g>
+
+  <!-- right side lighting pool -->
+  <ellipse cx="1120" cy="150" rx="330" ry="200" fill="url(#pool)"/>
+  <rect x="620" y="0" width="660" height="320" fill="url(#fade)" opacity="0.25"/>
+
+  <!-- kraft rods -->
+  <rect x="0" y="0" width="1280" height="10" fill="url(#kraft)"/>
+  <rect x="0" y="310" width="1280" height="10" fill="url(#kraft)"/>
+  <rect x="0" y="0" width="1280" height="2" fill="#f0cf9a" fill-opacity="0.45"/>
+  <rect x="0" y="310" width="1280" height="2" fill="#f0cf9a" fill-opacity="0.35"/>
+
+  <!-- wax seal -->
+  <g>
+    <circle cx="104" cy="154" r="46" fill="#000000" fill-opacity="0.45" filter="url(#soft2)"/>
+    <circle cx="100" cy="148" r="44" fill="url(#wax)"/>
+    <circle cx="100" cy="148" r="34" fill="none" stroke="#f4c9ae" stroke-opacity="0.32" stroke-width="1.5"/>
+    <path d="M100 128 L107 143 L123 148 L107 153 L100 168 L93 153 L77 148 L93 143 Z"
+          fill="#f7e2cf" fill-opacity="0.92"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="176" y="132" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="54" font-weight="700" letter-spacing="-1.2" fill="#f8efdd">ineedhood tech</text>
+  <text x="178" y="172" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="19" fill="#cdb99b">A 3D office that shows what my AI agents are doing, in real time.</text>
+  <text x="178" y="204" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="14" fill="#a08a6c">hermes plans &#183; opencode executes &#183; SSE to the browser</text>
+
+  <!-- chips -->
+  <g font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13">
+    <rect x="178" y="236" width="104" height="30" rx="15" fill="#ffffff" fill-opacity="0.055" stroke="#d8aa68" stroke-opacity="0.5"/>
+    <text x="230" y="256" text-anchor="middle" fill="#e9d9bd">React 19</text>
+    <rect x="292" y="236" width="104" height="30" rx="15" fill="#ffffff" fill-opacity="0.055" stroke="#d8aa68" stroke-opacity="0.5"/>
+    <text x="344" y="256" text-anchor="middle" fill="#e9d9bd">three.js</text>
+    <rect x="406" y="236" width="128" height="30" rx="15" fill="#ffffff" fill-opacity="0.055" stroke="#d8aa68" stroke-opacity="0.5"/>
+    <text x="470" y="256" text-anchor="middle" fill="#e9d9bd">Node, no deps</text>
+    <rect x="544" y="236" width="74" height="30" rx="15" fill="#ffffff" fill-opacity="0.055" stroke="#d8aa68" stroke-opacity="0.5"/>
+    <text x="581" y="256" text-anchor="middle" fill="#e9d9bd">MIT</text>
+  </g>
+
+  <!-- isometric room -->
+  <g transform="translate(820 0)">
+    <ellipse cx="300" cy="252" rx="150" ry="26" fill="#000000" fill-opacity="0.5" filter="url(#soft)"/>
+
+    <!-- walls -->
+    <polygon points="160,180 300,110 300,30 160,100" fill="#3a291c" stroke="#d8aa68" stroke-opacity="0.55" stroke-width="1.3"/>
+    <polygon points="300,110 440,180 440,100 300,30" fill="#2c1f15" stroke="#d8aa68" stroke-opacity="0.45" stroke-width="1.3"/>
+
+    <!-- shoji grid on the right wall -->
+    <g stroke="#f6e7c8" stroke-opacity="0.3" stroke-width="1">
+      <line x1="335" y1="127.5" x2="335" y2="47.5"/>
+      <line x1="370" y1="145" x2="370" y2="65"/>
+      <line x1="405" y1="162.5" x2="405" y2="82.5"/>
+      <line x1="300" y1="83.6" x2="440" y2="153.6"/>
+      <line x1="300" y1="56.8" x2="440" y2="126.8"/>
+    </g>
+
+    <!-- neon strip on the back wall -->
+    <g>
+      <line x1="192" y1="124" x2="278" y2="82" stroke="#ffb066" stroke-opacity="0.55" stroke-width="9" filter="url(#soft2)"/>
+      <line x1="192" y1="124" x2="278" y2="82" stroke="#ffd9ad" stroke-opacity="0.9" stroke-width="2.2"/>
+    </g>
+
+    <!-- floor -->
+    <polygon points="300,110 440,180 300,250 160,180" fill="#3f2c1d" stroke="#d8aa68" stroke-opacity="0.75" stroke-width="1.6"/>
+    <polygon points="300,110 440,180 300,250 160,180" fill="#000000" fill-opacity="0.12"/>
+
+    <!-- desks -->
+    <g>
+      <circle cx="240" cy="162" r="30" fill="url(#ember)"/>
+      <polygon points="226,162 240,155 254,162 240,169" fill="#54402c" stroke="#d8aa68" stroke-opacity="0.6"/>
+      <circle cx="240" cy="162" r="3.6" fill="#35c6b0"/>
+    </g>
+    <g>
+      <circle cx="300" cy="198" r="30" fill="url(#ember)"/>
+      <polygon points="286,198 300,191 314,198 300,205" fill="#54402c" stroke="#d8aa68" stroke-opacity="0.6"/>
+      <circle cx="300" cy="198" r="3.6" fill="#f0a35e"/>
+    </g>
+    <g>
+      <circle cx="358" cy="160" r="30" fill="url(#ember)"/>
+      <polygon points="344,160 358,153 372,160 358,167" fill="#54402c" stroke="#d8aa68" stroke-opacity="0.6"/>
+      <circle cx="358" cy="160" r="3.6" fill="#f06a9b"/>
+    </g>
+    <g>
+      <circle cx="300" cy="132" r="30" fill="url(#ember)"/>
+      <polygon points="286,132 300,125 314,132 300,139" fill="#54402c" stroke="#d8aa68" stroke-opacity="0.6"/>
+      <circle cx="300" cy="132" r="3.6" fill="#9b6cf0"/>
+    </g>
+  </g>
+</svg>
