@@ -94,15 +94,19 @@ export class OfficeScene {
   private goalAz = this.az;
   private goalEl = this.el;
   private goalDist = DEFAULT.dist;
-  private dragMode: 'orbit' | 'pan' = 'orbit';
+  private dragMode: 'orbit' | 'pan' | 'pinch' = 'orbit';
   private goalTarget = this.target.clone();
 
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
   private dragging = false;
   private moved = 0;
-  private lastX = 0;
-  private lastY = 0;
+  // Every pointer that is currently down. A phone can have two of them, and
+  // the gesture is decided by how many there are, not by which button was
+  // pressed: one finger orbits, two fingers pinch and pan together.
+  private pointers = new Map<number, { x: number; y: number }>();
+  private pinchDist = 0;
+  private pinchCenter = { x: 0, y: 0 };
   private reduced = false;
   private frames = 0;
   private fpsClock = 0;
@@ -245,6 +249,7 @@ export class OfficeScene {
     c.addEventListener('pointerdown', this.onDown);
     window.addEventListener('pointermove', this.onMove);
     window.addEventListener('pointerup', this.onUp);
+    window.addEventListener('pointercancel', this.onCancel);
     c.addEventListener('wheel', this.onWheel, { passive: false });
     c.addEventListener('contextmenu', this.onContext);
     window.addEventListener('resize', this.resize);
@@ -263,30 +268,49 @@ export class OfficeScene {
   };
 
   private onDown = (e: PointerEvent) => {
+    const first = this.pointers.size === 0;
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     this.dragging = true;
-    this.moved = 0;
+    // The movement counter belongs to the whole gesture, so a second finger
+    // landing mid drag must not reset it.
+    if (first) this.moved = 0;
     this.dragMode = e.button === 2 || e.button === 1 || e.shiftKey ? 'pan' : 'orbit';
-    this.lastX = e.clientX;
-    this.lastY = e.clientY;
     if (e.button === 2) e.preventDefault();
+    // A second finger turns the gesture into a pinch, whatever the first one
+    // was doing. The touch-action rule in the stylesheet keeps the browser
+    // from stealing it for scrolling.
+    if (this.pointers.size >= 2) {
+      this.dragMode = 'pinch';
+      this.pinchDist = this.pointerSpread();
+      this.pinchCenter = this.pointerCenter();
+    }
   };
 
   private onMove = (e: PointerEvent) => {
     if (!this.dragging) return;
-    const dx = e.clientX - this.lastX;
-    const dy = e.clientY - this.lastY;
-    this.lastX = e.clientX;
-    this.lastY = e.clientY;
+    const prev = this.pointers.get(e.pointerId);
+    if (!prev) return;
+    const dx = e.clientX - prev.x;
+    const dy = e.clientY - prev.y;
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     this.moved += Math.abs(dx) + Math.abs(dy);
 
+    if (this.dragMode === 'pinch' && this.pointers.size >= 2) {
+      const spread = this.pointerSpread();
+      const center = this.pointerCenter();
+      // Spreading the fingers pulls the camera in, pinching pushes it away.
+      if (this.pinchDist > 0 && spread > 0) {
+        this.goalDist = THREE.MathUtils.clamp(this.goalDist * (this.pinchDist / spread), 15, 46);
+      }
+      this.pinchDist = spread;
+      // Moving the midpoint sideways slides the room under the camera.
+      this.panBy(center.x - this.pinchCenter.x, center.y - this.pinchCenter.y);
+      this.pinchCenter = center;
+      return;
+    }
+
     if (this.dragMode === 'pan') {
-      const right = new THREE.Vector3(Math.cos(this.az), 0, -Math.sin(this.az));
-      const fwd = new THREE.Vector3(-Math.sin(this.az), 0, -Math.cos(this.az));
-      const s = this.dist * 0.0016;
-      this.goalTarget.addScaledVector(right, -dx * s).addScaledVector(fwd, dy * s * 1.15);
-      this.goalTarget.x = THREE.MathUtils.clamp(this.goalTarget.x, -7, 7);
-      this.goalTarget.z = THREE.MathUtils.clamp(this.goalTarget.z, -5, 5);
-      this.goalTarget.y = DEFAULT.ty;
+      this.panBy(dx, dy);
     } else {
       this.goalAz -= dx * 0.006;
       this.goalEl = THREE.MathUtils.clamp(this.goalEl - dy * 0.004, 0.16, 1.36);
@@ -295,14 +319,74 @@ export class OfficeScene {
 
   private onUp = (e: PointerEvent) => {
     if (!this.dragging) return;
+    // A pointerup we never saw a pointerdown for belongs to some other part
+    // of the page, not to the camera.
+    if (!this.pointers.delete(e.pointerId)) return;
     const wasOrbit = this.dragMode === 'orbit';
+    if (this.pointers.size > 0) {
+      // Coming out of a pinch: resume a one finger orbit from wherever the
+      // remaining finger is, so the camera does not jump.
+      this.dragMode = 'orbit';
+      return;
+    }
     this.dragging = false;
-    if (this.moved < 6 && wasOrbit && e.button === 0) this.pick(e);
+    this.dragMode = 'orbit';
+    // A tap under the movement threshold selects an agent. A fingertip
+    // drifts further than a mouse does, so the bar is looser for touch.
+    const threshold = e.pointerType === 'touch' ? 14 : 6;
+    if (this.moved < threshold && wasOrbit && (e.button === 0 || e.pointerType === 'touch')) {
+      this.pick(e);
+    }
   };
+
+  // The browser fires pointercancel when it takes a gesture over, for example
+  // for a scroll. Without this the camera kept orbiting from stale
+  // coordinates long after the finger had left the glass.
+  private onCancel = (e: PointerEvent) => {
+    if (!this.dragging) return;
+    if (!this.pointers.delete(e.pointerId)) return;
+    if (this.pointers.size > 0) {
+      this.dragMode = 'orbit';
+      return;
+    }
+    this.dragging = false;
+    this.dragMode = 'orbit';
+  };
+
+  private panBy(dx: number, dy: number) {
+    const right = new THREE.Vector3(Math.cos(this.az), 0, -Math.sin(this.az));
+    const fwd = new THREE.Vector3(-Math.sin(this.az), 0, -Math.cos(this.az));
+    const s = this.dist * 0.0016;
+    this.goalTarget.addScaledVector(right, -dx * s).addScaledVector(fwd, dy * s * 1.15);
+    this.goalTarget.x = THREE.MathUtils.clamp(this.goalTarget.x, -7, 7);
+    this.goalTarget.z = THREE.MathUtils.clamp(this.goalTarget.z, -5, 5);
+    this.goalTarget.y = DEFAULT.ty;
+  }
+
+  private pointerSpread() {
+    const pts = [...this.pointers.values()];
+    if (pts.length < 2) return 0;
+    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+  }
+
+  private pointerCenter() {
+    const pts = [...this.pointers.values()];
+    if (!pts.length) return { x: 0, y: 0 };
+    let x = 0;
+    let y = 0;
+    for (const p of pts) {
+      x += p.x;
+      y += p.y;
+    }
+    return { x: x / pts.length, y: y / pts.length };
+  }
 
   private onWheel = (e: WheelEvent) => {
     e.preventDefault();
-    this.goalDist = THREE.MathUtils.clamp(this.goalDist * (1 + e.deltaY * 0.0011), 15, 46);
+    // Chrome delivers a pinch as a ctrlKey wheel event with a much larger
+    // delta than a mouse notch, so it needs its own scale.
+    const k = e.ctrlKey ? 0.01 : 0.0011;
+    this.goalDist = THREE.MathUtils.clamp(this.goalDist * (1 + e.deltaY * k), 15, 46);
   };
 
   private pick(e: PointerEvent) {
@@ -703,6 +787,7 @@ export class OfficeScene {
     c.removeEventListener('pointerdown', this.onDown);
     window.removeEventListener('pointermove', this.onMove);
     window.removeEventListener('pointerup', this.onUp);
+    window.removeEventListener('pointercancel', this.onCancel);
     c.removeEventListener('wheel', this.onWheel);
     c.removeEventListener('contextmenu', this.onContext);
     window.removeEventListener('resize', this.resize);
