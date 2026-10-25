@@ -64,7 +64,8 @@ does not exist, the files panel is empty instead of showing a placeholder.
    should do, in what order.
 3. It spawns one `opencode` process per task, each in a **private directory**, so two
    workers can never fight over the same file.
-4. Workers write real files into `workspace/<runId>/<agent>/`.
+4. Workers write real files into `runs/<runId>/<agent>/` (or `runs/projects/<id>/<agent>/`;
+   the root is `WORKSPACE_DIR`).
 5. Every step is pushed to the UI over SSE. The scene, the task list and the project view
    all read from that one feed.
 
@@ -98,25 +99,46 @@ hermes gateway status
 ## Run it
 
 ```bash
-npm ci
-npm run build            # tsc -b && vite build -> dist/
-node server/set-pass.mjs <your-password>
-node server/bridge.mjs   # serves dist + API on :8080
+git clone https://github.com/salsabila2507/ineedhood-tech.git
+cd ineedhood-tech
+npm ci                                   # build tooling only, the server has no deps
+npm run build                            # tsc -b && vite build -> dist/
+node server/set-pass.mjs <your-password> # min 4 characters, writes data/auth.json
+node server/bridge.mjs                   # serves dist + API on 0.0.0.0:8080
 ```
 
-Open <http://localhost:8080> and enter the password. The hash is written to
-`data/auth.json` (chmod 600).
+Open <http://localhost:8080> and enter the password. Only a scrypt hash is stored, in
+`data/auth.json` (chmod 600). Run `set-pass.mjs` again to change it.
 
-If `data/auth.json` does not exist the bridge runs with no password at all, which is only
-acceptable on localhost.
+**No password?** The bridge refuses to start without `data/auth.json` when it would listen
+on a network interface (the default `0.0.0.0`). To try it on your own machine without a
+password, bind it to loopback:
+
+```bash
+BIND_HOST=127.0.0.1 node server/bridge.mjs
+```
+
+In that mode it prints a warning, only answers requests addressed to `localhost` /
+`127.0.0.1` (so a tunnel or reverse proxy in front of it gets nothing), and the gate's
+**View only** button gives you the owner session. Set a password before exposing it
+anywhere; sessions issued in this mode stop working once a password exists.
+
+Checks:
+
+```bash
+npm run lint    # oxlint
+npm test        # starts the bridge on a random port and checks the auth and guest rules
+```
 
 ## Requirements
 
 - Node 22 (tested on 22.23.3). Nothing else is required to run the UI.
 - Optional, only for real runs: a `hermes` binary and an `opencode` binary, plus a model
-  endpoint that `opencode` can reach. Point at them with `HERMES_BIN`, `OPENCODE_BIN`,
-  `OC_MODEL`, `OC_GATEWAY`.
+  endpoint that `opencode` can reach. They are not installed by `npm ci`. The default
+  paths (`/data/home/...`) match the author's machine, so on a fresh clone point at your
+  own with `HERMES_BIN`, `OPENCODE_BIN`, `OC_MODEL`, `OC_GATEWAY`.
 - Optional, only for the Knowledge view: `python3` and an ICM SQLite database.
+- Optional, only for image generation: `curl` and `IMAGE_KEY` for the image gateway.
 
 Without the agent binaries the UI still runs, the scene still renders, and the runtime
 panel honestly says `Hermes not found` or `OpenCode not found`.
@@ -140,12 +162,20 @@ runs. A guest session needs no password and may only read.
 - On the gate, **Lihat saja / View only** issues a guest session with one click.
 - `https://your-host/?guest=1` enters guest mode directly, so a view-only link can be
   shared without telling anyone the password.
-- The bridge enforces this, not the UI. A guest token gets
-  `403 {"error":"guest mode is read-only"}` on `POST /api/task`, `/api/image`,
-  `/api/projects`, `/api/projects/delete`, and every other mutating route. The role lives
-  in the server session map, so editing localStorage does not upgrade it.
-- In guest mode the command center is disabled, the project form and the run and delete
-  buttons are hidden, and a badge in the sidebar says why.
+- A guest can watch the office: `/api/state`, the `/api/stream` SSE feed, `/api/whoami`,
+  the project list (`GET /api/projects`: titles, status, progress) and a redacted
+  `/api/runtime` (binary versions and model, no local paths or gateway URL). Note that
+  the run state includes the current prompt and task summaries, because that is what the
+  room draws.
+- Everything else is owner only. The bridge enforces this, not the UI: a guest token
+  gets `403 {"error":"guest mode is read-only"}` on the ICM memory (`/api/knowledge`),
+  project briefs (`/api/projects/detail`), run artifacts (`/api/files`, `/api/file`),
+  skills, and on every mutating route (`POST /api/task`, `/api/image`, `/api/projects`,
+  `/api/projects/delete`, ...). The role lives in the server session map, so editing
+  localStorage does not upgrade it.
+- In guest mode the command center is disabled, the project form and the run, detail and
+  delete buttons are hidden, the Knowledge view shows an owner-only note, and a badge in
+  the sidebar says why.
 - An existing owner session is never downgraded by opening `?guest=1`.
 
 ## What is live and what is not
@@ -183,6 +213,7 @@ server/
   bridge.mjs        static build + API + SSE + agent runner
   set-pass.mjs      write the password hash
   knowledge.py      read the ICM memory database for the Knowledge view
+  test/             node --test smoke tests for the auth and guest rules
 public/             favicon and static bits
 docs/               the images used in this README
 scripts/legacy/     the old python http.server start and stop scripts
@@ -195,20 +226,23 @@ The SSE route also accepts `?token=`. `/health` and the static build are open, w
 why the browser can load the page and then ask for the password.
 
 Get an owner token from `POST /api/auth` with `{"password":"..."}`, or a read only token
-from `POST /api/guest` with no body.
+from `POST /api/guest` with no body. After 10 wrong passwords from one address within 15
+minutes, `/api/auth` answers `429` with `Retry-After` until the window ends.
+
+Guest tokens may only `GET` the routes marked "guest" below; everything else is `403`.
 
 | Route | Method | Purpose |
 | --- | --- | --- |
 | `/health` | GET | liveness, no auth |
 | `/api/auth` | POST | exchange the password for an owner token |
 | `/api/guest` | POST | read only token, no password |
-| `/api/whoami` | GET | role of the current token |
-| `/api/state` | GET | current run, tasks, agents |
-| `/api/stream` | GET | SSE feed of state changes |
+| `/api/whoami` | GET | role of the current token (guest) |
+| `/api/state` | GET | current run, tasks, agents (guest) |
+| `/api/stream` | GET | SSE feed of state changes (guest) |
 | `/api/task` | POST | submit a prompt, returns `202` |
 | `/api/image` | POST | generate an image through the gateway |
-| `/api/runtime` | GET | bridge, hermes, opencode, model, memory |
-| `/api/projects` | GET, POST | list projects / create one |
+| `/api/runtime` | GET | bridge, hermes, opencode, model, memory (guest: redacted) |
+| `/api/projects` | GET, POST | list projects / create one (guest: GET only) |
 | `/api/projects/detail` | GET | one project with its runs |
 | `/api/projects/delete` | POST | delete a project |
 | `/api/files` | GET | artifacts produced by a run |
@@ -225,6 +259,7 @@ when your layout differs.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP port |
+| `BIND_HOST` | `0.0.0.0` | interface to listen on; use `127.0.0.1` to stay local |
 | `DATA_DIR` | `<repo>/data` | `auth.json`, `projects.json` |
 | `WORKSPACE_DIR` | `<repo>/runs` | where runs and artifacts are written |
 | `STAGING_DIR` | `<repo>/staging` | allowed root for an explicit `workdir` |
@@ -246,6 +281,21 @@ when your layout differs.
 - The bridge has no runtime dependencies. `npm ci` installs build tooling only.
 - It is a single-user tool. The hosted copy exposes a read-only guest view, so nobody
   else can start a run.
+
+## Troubleshooting
+
+- **`refusing to start: no password is set`**: run `node server/set-pass.mjs <password>`,
+  or start with `BIND_HOST=127.0.0.1` for local-only use.
+- **Blank page or `not built`**: run `npm run build`; the bridge serves `dist/`.
+- **Runtime panel says `Hermes not found` / `OpenCode not found`**: expected without the
+  optional binaries. Set `HERMES_BIN` / `OPENCODE_BIN` to real paths for runs.
+- **`429 too many attempts`** on login: wait out the 15 minute window, or restart the
+  bridge (the counter is in memory).
+- **Reaching it from outside your machine**: this repo does not ship a tunnel. Keep the
+  bridge running under a process manager (for example a systemd service), set a
+  password, and put it behind your own reverse proxy or a tunnel such as `cloudflared`
+  (itself run as a service so it survives logout), or run it on a VPS. A tunnel pointed
+  at a password-less loopback bridge is refused on purpose.
 
 ## License
 

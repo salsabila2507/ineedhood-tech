@@ -425,7 +425,7 @@ function Office({ role }: { role: Role }) {
           )}
           {view === 'tasks' && <TasksView tasks={tasks} live={live} onOpen={(id) => setOpenTask(id)} />}
           {view === 'projects' && <ProjectsView live={live} guest={guest} onRun={(p, id) => submitTask(p, id)} />}
-          {view === 'knowledge' && <KnowledgeView />}
+          {view === 'knowledge' && <KnowledgeView guest={guest} />}
           {view === 'tools' && <ToolsView />}
           {view === 'settings' && (
             <SettingsView
