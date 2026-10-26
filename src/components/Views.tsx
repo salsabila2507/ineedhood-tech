@@ -375,8 +375,8 @@ export function ProjectsView({
       return;
     }
     apiFetch('/api/projects/detail?id=' + encodeURIComponent(id))
-      .then((r) => r.json())
-      .then((d) => setDetail(d as ProjectRecord))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setDetail(d && typeof d === 'object' && 'id' in d ? (d as ProjectRecord) : null))
       .catch(() => setDetail(null));
   };
 
@@ -522,9 +522,11 @@ export function ProjectsView({
                   {p.status === 'running' || p.status === 'planning' ? tr('projRunning') : tr('projRun')}
                 </button>
               )}
-              <button type="button" className="proj-btn" onClick={() => openDetail(p.id)}>
-                {tr('projDetail')}
-              </button>
+              {!guest && (
+                <button type="button" className="proj-btn" onClick={() => openDetail(p.id)}>
+                  {tr('projDetail')}
+                </button>
+              )}
               {!guest && (
                 <button type="button" className="proj-btn danger" onClick={() => remove(p.id)}>
                   {tr('projDelete')}
@@ -988,24 +990,47 @@ type KnowledgeData = {
   error?: string;
 };
 
-export function KnowledgeView() {
+export function KnowledgeView({ guest }: { guest?: boolean }) {
   const { t: tr } = useLang();
   const [data, setData] = useState<KnowledgeData | null>(null);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(() => {
+    // The bridge refuses /api/knowledge for guests, so do not even ask.
+    if (guest) return;
     setLoading(true);
     apiFetch('/api/knowledge')
       .then((r) => r.json())
-      .then((d) => setData(d as KnowledgeData))
+      .then((d) => {
+        const k = (d && typeof d === 'object' ? d : {}) as Partial<KnowledgeData>;
+        setData({
+          ...k,
+          memories: Array.isArray(k.memories) ? k.memories : [],
+          facts: Array.isArray(k.facts) ? k.facts : [],
+        });
+      })
       .catch(() => setData({ memories: [], facts: [], error: 'unreachable' }))
       .finally(() => setLoading(false));
-  }, []);
+  }, [guest]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  if (guest) {
+    return (
+      <div className="view">
+        <header className="view-head">
+          <div>
+            <h2>{tr('knowledgeTitle')}</h2>
+            <p>{tr('knowledgeSub')}</p>
+          </div>
+        </header>
+        <p className="proj-guest-note">{tr('guestPrivate')}</p>
+      </div>
+    );
+  }
 
   const q = query.trim().toLowerCase();
   const mems = (data?.memories || []).filter(

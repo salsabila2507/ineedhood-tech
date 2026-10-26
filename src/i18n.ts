@@ -38,7 +38,8 @@ const DICT: Dict = {
 
   // guest mode: read only, no commands
   guestEnter: { id: 'Lihat saja', en: 'View only' },
-  guestHint: { id: 'Tanpa password. Mode tamu bisa melihat semua, tapi tidak bisa mengirim perintah.', en: 'No password needed. Guest mode can see everything but cannot send commands.' },
+  guestHint: { id: 'Tanpa password. Mode tamu bisa melihat kantor dan status run, tapi tidak bisa mengirim perintah atau membaca memori dan file.', en: 'No password needed. Guest mode can watch the office and run status, but cannot send commands or read memory and files.' },
+  guestPrivate: { id: 'Hanya pemilik. Mode tamu tidak bisa membaca memori, brief proyek, atau file hasil.', en: 'Owner only. Guest mode cannot read memory, project briefs or output files.' },
   guestMode: { id: 'Mode tamu', en: 'Guest mode' },
   guestReadOnly: { id: 'Mode tamu hanya bisa melihat. Perintah dan perubahan dinonaktifkan.', en: 'Guest mode is view only. Commands and changes are disabled.' },
   guestCmdPh: { id: 'Mode tamu: perintah dinonaktifkan', en: 'Guest mode: commands are disabled' },

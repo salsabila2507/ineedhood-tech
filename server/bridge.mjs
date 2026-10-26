@@ -1,12 +1,17 @@
-
 import http from "node:http";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+const execFileAsync = promisify(execFile);
+
 const PORT = Number(process.env.PORT || 8080);
+// Interface to listen on. 0.0.0.0 keeps the old behaviour (reachable from the
+// network); set BIND_HOST=127.0.0.1 to keep the bridge on this machine only.
+const BIND_HOST = process.env.BIND_HOST || "0.0.0.0";
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = process.env.DIST_DIR || path.join(ROOT, "dist");
 const HOME_DIR = process.env.HOME_DIR || process.env.HOME || "/data/home";
@@ -42,6 +47,9 @@ const MAX_IMG = 2 * 1024 * 1024;
 
 const AUTH_FILE = path.join(DATA_DIR, "auth.json");
 const SESSION_TTL = 30 * 24 * 3600 * 1000; // 30 days
+// /api/guest needs no password, so cap how many guest sessions can pile up in
+// memory. The oldest guest session is dropped first.
+const GUEST_SESSION_MAX = 500;
 // token -> { exp, role }. Two roles exist: "owner" may run commands, "guest"
 // may only read. The role is held on the server, so a guest cannot upgrade
 // itself by editing anything in the browser.
@@ -57,14 +65,46 @@ function pruneSessions() {
   const now = Date.now();
   for (const [t, s] of sessions) if (!s || s.exp < now) sessions.delete(t);
 }
-function newSession(role) {
+function newSession(role, opts = {}) {
   pruneSessions();
+  const isGuest = role === "guest";
+  if (isGuest) {
+    let guests = 0;
+    for (const s of sessions.values()) if (s.role === "guest") guests++;
+    for (const [t, s] of sessions) {
+      if (guests < GUEST_SESSION_MAX) break;
+      if (s.role === "guest") { sessions.delete(t); guests--; }
+    }
+  }
   const token = crypto.randomBytes(32).toString("hex");
   sessions.set(token, {
     exp: Date.now() + SESSION_TTL,
-    role: role === "guest" ? "guest" : "owner",
+    role: isGuest ? "guest" : "owner",
+    // Issued while no password existed. Such a token stops working as soon as
+    // a password is set, so it cannot outlive the open localhost mode.
+    open: Boolean(opts.open),
   });
   return token;
+}
+
+function isLoopbackHost(host) {
+  const h = String(host || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return h === "localhost" || h === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+const LOOPBACK_BIND = isLoopbackHost(BIND_HOST);
+
+// The Host header the browser used. Without a password the bridge only answers
+// requests addressed to localhost, which blocks DNS rebinding and a tunnel or
+// reverse proxy that would otherwise publish the open bridge to the internet.
+function hostHeaderIsLocal(req) {
+  const raw = String(req.headers.host || "").trim().toLowerCase();
+  const name = raw.startsWith("[") ? raw.slice(0, raw.indexOf("]") + 1) : raw.split(":")[0];
+  return isLoopbackHost(name);
+}
+
+// No password: allowed only when bound to loopback and addressed as localhost.
+function openModeAllowed(req) {
+  return LOOPBACK_BIND && hostHeaderIsLocal(req);
 }
 function checkPassword(password) {
   const a = readAuth();
@@ -75,10 +115,16 @@ function checkPassword(password) {
   return crypto.timingSafeEqual(test, want);
 }
 function sessionOf(req) {
-  if (!readAuth()) return { exp: Infinity, role: "owner" }; // no password set: the bridge stays open
+  const auth = readAuth();
+  // No password set. Fail closed unless this is the loopback-only open mode.
+  // Even then a token from /api/guest is required, so a random web page cannot
+  // drive the bridge through the browser with a blind cross-site POST.
+  if (!auth && !openModeAllowed(req)) return null;
   const live = (t) => {
     const s = t ? sessions.get(t) : null;
-    return s && s.exp > Date.now() ? s : null;
+    if (!s || s.exp <= Date.now()) return null;
+    if (auth && s.open) return null;
+    return s;
   };
   const header = String(req.headers["x-0xyas-token"] || "");
   const direct = live(header);
@@ -93,18 +139,42 @@ function authorized(req) {
 
 // Guest tokens are read only. Anything that changes state, starts a run or
 // spends gateway credits is refused here, not merely hidden in the UI.
+// A guest may only watch the office: run state, the live feed, the project
+// list (titles and progress) and a redacted runtime probe. Memory (ICM),
+// project briefs, artifacts and skills stay owner only.
 const GUEST_READ = new Set([
   "/api/state",
   "/api/stream",
   "/api/whoami",
   "/api/projects",
-  "/api/projects/detail",
-  "/api/files",
-  "/api/file",
-  "/api/skills",
-  "/api/knowledge",
   "/api/runtime",
 ]);
+
+// Slow down password guessing on /api/auth: after AUTH_MAX_FAILS wrong
+// passwords from one address inside AUTH_WINDOW_MS, answer 429 until the window
+// ends. Behind a tunnel every client shares one address, so this is a global
+// brake there, which is still the right trade for a single-owner tool.
+const AUTH_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_MAX_FAILS = 10;
+const AUTH_MAX_BODY = 4096;
+const authFails = new Map(); // address -> { count, first }
+
+function authRetryAfter(addr) {
+  const e = authFails.get(addr);
+  if (!e) return 0;
+  const left = e.first + AUTH_WINDOW_MS - Date.now();
+  if (left <= 0) { authFails.delete(addr); return 0; }
+  return e.count >= AUTH_MAX_FAILS ? Math.ceil(left / 1000) : 0;
+}
+function noteAuthFail(addr) {
+  const now = Date.now();
+  if (authFails.size > 10000) {
+    for (const [a, e] of authFails) if (e.first + AUTH_WINDOW_MS <= now) authFails.delete(a);
+  }
+  const e = authFails.get(addr);
+  if (!e || e.first + AUTH_WINDOW_MS <= now) authFails.set(addr, { count: 1, first: now });
+  else e.count++;
+}
 
 function readProjects() {
   try {
@@ -281,18 +351,20 @@ function matchSkills(text, limit) {
 let runtimeCache = null;
 let runtimeAt = 0;
 let runtimeTtl = 30000;
+let runtimePending = null;
 
 // A version probe runs a real binary. A transient exec failure must never be
 // reported as "not connected", so retry once and keep track of whether the
 // probe itself succeeded.
-function probeVersion(bin) {
+// Async so a slow binary never blocks the event loop (and every other request).
+async function probeVersion(bin) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const out = execFileSync(bin, ["--version"], {
+      const { stdout } = await execFileAsync(bin, ["--version"], {
         timeout: 20000,
         env: ENV,
-        stdio: ["ignore", "pipe", "pipe"],
-      }).toString().trim();
+      });
+      const out = String(stdout || "").trim();
       return { ok: true, version: out ? out.split(/\r?\n/)[0].slice(0, 120) : null };
     } catch (e) {
       // Missing or non-executable binary is a definitive answer, not a glitch.
@@ -306,7 +378,15 @@ function probeVersion(bin) {
 }
 
 function runtimeInfo() {
-  if (runtimeCache && Date.now() - runtimeAt < runtimeTtl) return runtimeCache;
+  if (runtimeCache && Date.now() - runtimeAt < runtimeTtl) return Promise.resolve(runtimeCache);
+  // Concurrent callers share one probe instead of each spawning binaries.
+  if (!runtimePending) {
+    runtimePending = probeRuntime().finally(() => { runtimePending = null; });
+  }
+  return runtimePending;
+}
+
+async function probeRuntime() {
   let memory = null;
   try {
     const db = process.env.ICM_DB || path.join(HOME_DIR, ".local/share/icm/memories.db");
@@ -317,8 +397,7 @@ function runtimeInfo() {
     const base = SKILLS_DIR;
     skills = fs.readdirSync(base).filter((n) => fs.statSync(path.join(base, n)).isDirectory()).length;
   } catch {}
-  const hermes = probeVersion(HERMES);
-  const opencode = probeVersion(OPENCODE);
+  const [hermes, opencode] = await Promise.all([probeVersion(HERMES), probeVersion(OPENCODE)]);
   runtimeCache = {
     bridge: "node " + process.version,
     hermes: hermes.version,
@@ -336,6 +415,20 @@ function runtimeInfo() {
   // A failed probe retries in 5s instead of staying wrong for a full minute.
   runtimeTtl = hermes.ok && opencode.ok ? 30000 : 5000;
   return runtimeCache;
+}
+
+// What a guest sees of the runtime probe: enough for the status dots in the
+// office, without local paths or the model gateway URL.
+function guestRuntime(info) {
+  return {
+    bridge: info.bridge,
+    hermes: info.hermes,
+    hermesOk: info.hermesOk,
+    opencode: info.opencode,
+    opencodeOk: info.opencodeOk,
+    model: info.model,
+    updatedAt: info.updatedAt,
+  };
 }
 
 function tail2(text, fallback) {
@@ -637,7 +730,13 @@ function listArtifacts(dir) {
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".json": "application/json", ".ico": "image/x-icon", ".woff2": "font/woff2", ".md": "text/plain; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".csv": "text/plain; charset=utf-8", ".xml": "text/plain; charset=utf-8" };
 
 function serveStatic(req, res) {
-  let p = decodeURIComponent(req.url.split("?")[0]);
+  let p;
+  try { p = decodeURIComponent(req.url.split("?")[0]); } catch {
+    // A malformed escape such as /%E0 used to throw and crash the process.
+    res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("bad request");
+    return;
+  }
   if (p === "/") p = "/index.html";
   const file = path.join(DIST, p);
   const inside = file === DIST || file.startsWith(DIST + path.sep);
@@ -661,19 +760,39 @@ function serveStatic(req, res) {
   res.end(fs.readFileSync(file));
 }
 
-const server = http.createServer((req, res) => {
+function handle(req, res) {
   const url = req.url.split("?")[0];
   if (url === "/api/auth" && req.method === "POST") {
+    const addr = String(req.socket.remoteAddress || "unknown");
+    const wait = authRetryAfter(addr);
+    if (wait > 0) {
+      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": String(wait) });
+      res.end('{"error":"too many attempts, try again later"}');
+      req.resume();
+      return;
+    }
     let body = "";
-    req.on("data", (c) => (body += c));
+    let tooBig = false;
+    req.on("data", (c) => {
+      if (tooBig) return;
+      body += c;
+      if (body.length > AUTH_MAX_BODY) tooBig = true;
+    });
     req.on("end", () => {
+      if (tooBig) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end('{"error":"request too large"}');
+        return;
+      }
       let password = "";
       try { password = String(JSON.parse(body).password || ""); } catch {}
       if (!checkPassword(password)) {
+        noteAuthFail(addr);
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end('{"error":"wrong password"}');
         return;
       }
+      authFails.delete(addr);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, token: newSession("owner"), role: "owner" }));
     });
@@ -683,9 +802,16 @@ const server = http.createServer((req, res) => {
   // exactly what someone who just wants to watch the office needs.
   if (url === "/api/guest" && req.method === "POST") {
     if (!readAuth()) {
-      // Nothing to protect: the owner session is already open.
+      if (!openModeAllowed(req)) {
+        // No password and not a localhost request: refuse rather than hand
+        // out an owner session to the network.
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end('{"error":"no password set; run node server/set-pass.mjs <password>"}');
+        return;
+      }
+      // Open localhost mode: nothing to protect, so this is an owner session.
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, token: newSession("owner"), role: "owner" }));
+      res.end(JSON.stringify({ ok: true, token: newSession("owner", { open: true }), role: "owner" }));
       return;
     }
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -740,7 +866,11 @@ const server = http.createServer((req, res) => {
       if (!prompt) { res.writeHead(400, { "Content-Type": "application/json" }); res.end('{"error":"prompt required"}'); return; }
       if (state.status === "planning" || state.status === "running") { res.writeHead(409, { "Content-Type": "application/json" }); res.end('{"error":"a run is already active"}'); return; }
       if (projectId && !readProjects().some((p) => p.id === projectId)) projectId = "";
-      if (workdir && (!workdir.startsWith(STAGING_ROOT + "/") || !fs.existsSync(workdir))) workdir = "";
+      if (workdir) {
+        // Resolve first so "staging/../elsewhere" cannot escape the staging root.
+        const real = path.resolve(workdir);
+        workdir = real.startsWith(path.resolve(STAGING_ROOT) + path.sep) && fs.existsSync(real) ? real : "";
+      }
       orchestrate(prompt, projectId, workdir).catch((e) => {
         state.status = "failed";
         state.error = String(e);
@@ -843,7 +973,7 @@ const server = http.createServer((req, res) => {
     if (!ENV.IMAGE_KEY) { res.writeHead(503, { "Content-Type": "application/json" }); res.end('{"error":"IMAGE_KEY not configured"}'); return; }
     let body = "";
     req.on("data", (c) => (body += c));
-    req.on("end", () => {
+    req.on("end", async () => {
       let prompt = "";
       let size = "1024x1024";
       try { const p = JSON.parse(body); prompt = String(p.prompt || ""); size = String(p.size || "1024x1024"); } catch {}
@@ -859,13 +989,17 @@ const server = http.createServer((req, res) => {
           const useSize = attempts[i];
           let out = "";
           try {
-            out = execFileSync("curl", [
+            // Async: a 90 s gateway call must not freeze every other request.
+            // maxBuffer is raised because a base64 image is larger than the
+            // 1 MB default and would otherwise fail as ENOBUFS.
+            const r = await execFileAsync("curl", [
               "-s", "-X", "POST",
               ENV.IMAGE_GATEWAY + "/images/generations",
               "-H", "Authorization: Bearer " + ENV.IMAGE_KEY,
               "-H", "Content-Type: application/json",
               "-d", JSON.stringify({ model: ENV.IMAGE_MODEL, prompt, n: 1, size: useSize }),
-            ], { timeout: 90000, env: ENV }).toString();
+            ], { timeout: 90000, env: ENV, maxBuffer: 64 * 1024 * 1024 });
+            out = String(r.stdout || "");
           } catch (e) {
             last = "gateway unreachable: " + String(e).slice(0, 90);
             continue;
@@ -881,12 +1015,12 @@ const server = http.createServer((req, res) => {
             }
             last = (j.error && (j.error.message || j.error.code)) || "no image data";
           }
-          if (i < attempts.length - 1) execFileSync("sleep", ["2"]);
+          if (i < attempts.length - 1) await sleep(2000);
         }
         res.writeHead(504, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "image gateway failed after 3 attempts: " + String(last).slice(0, 160) }));
       } catch (e) {
-        res.writeHead(502);
+        if (!res.headersSent) res.writeHead(502, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(e).slice(0, 200) }));
       }
     });
@@ -912,20 +1046,27 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url === "/api/knowledge") {
-    let payload = { memories: [], facts: [], topics: 0, dbKb: 0, error: "unavailable" };
-    try {
-      const out = execFileSync("python3", [path.join(ROOT, "server", "knowledge.py")], { timeout: 15000 }).toString();
-      payload = JSON.parse(out);
-    } catch (e) {
-      payload.error = String(e).slice(0, 200);
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(payload));
+    const payload = { memories: [], facts: [], topics: 0, dbKb: 0, error: "unavailable" };
+    execFileAsync("python3", [path.join(ROOT, "server", "knowledge.py")], { timeout: 15000, maxBuffer: 16 * 1024 * 1024 })
+      .then((r) => JSON.parse(String(r.stdout)))
+      .catch((e) => ({ ...payload, error: String(e).slice(0, 200) }))
+      .then((out) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(out));
+      });
     return;
   }
   if (url === "/api/runtime") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(runtimeInfo()));
+    const guest = session && session.role === "guest";
+    runtimeInfo()
+      .then((info) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(guest ? guestRuntime(info) : info));
+      })
+      .catch((e) => {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(e).slice(0, 200) }));
+      });
     return;
   }
   if (url === "/api/skills") {
@@ -957,9 +1098,45 @@ const server = http.createServer((req, res) => {
   }
   if (url === "/health") { res.writeHead(200, { "Content-Type": "application/json" }); res.end('{"ok":true}'); return; }
   serveStatic(req, res);
+}
+
+const server = http.createServer((req, res) => {
+  // One bad request must never take the whole bridge down.
+  try {
+    handle(req, res);
+  } catch (e) {
+    console.error("[http] " + req.method + " " + String(req.url).slice(0, 120) + ": " + String(e && e.stack || e));
+    try {
+      if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" });
+      res.end('{"error":"internal error"}');
+    } catch {}
+  }
 });
+
+// Refuse to publish an unprotected bridge. Without data/auth.json anyone who
+// can reach the port would be the owner and could start agent runs, so that is
+// only tolerated on a loopback bind.
+if (!readAuth()) {
+  if (!LOOPBACK_BIND) {
+    console.error(
+      "[boot] refusing to start: no password is set (" + AUTH_FILE + " is missing) and the bridge would listen on " +
+      BIND_HOST + ", which is reachable from the network.\n" +
+      "       Set a password:    node server/set-pass.mjs <password>\n" +
+      "       or stay local:     BIND_HOST=127.0.0.1 node server/bridge.mjs",
+    );
+    process.exit(1);
+  }
+  console.warn(
+    "[boot] WARNING: no password set. The bridge is open to anyone on this machine at " + BIND_HOST +
+    " and only answers requests addressed to localhost. Run node server/set-pass.mjs <password> before exposing it.",
+  );
+}
 
 fs.mkdirSync(WORKSPACE, { recursive: true });
 const reconciled = reconcileProjects();
 if (reconciled) console.log("[boot] marked " + reconciled + " stale project run(s) as interrupted");
-server.listen(PORT, "0.0.0.0", () => console.log("0xyas bridge on :" + PORT));
+server.listen(PORT, BIND_HOST, () => {
+  const addr = server.address();
+  const port = addr && typeof addr === "object" ? addr.port : PORT;
+  console.log("0xyas bridge on " + BIND_HOST + ":" + port);
+});
