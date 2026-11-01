@@ -286,3 +286,72 @@ test("the SSE feed stops accepting connections past its ceiling", async () => {
   assert.equal(extra.status, 429);
   for (const req of held) req.destroy();
 });
+
+test("a password does not open the bridge to DNS rebinding", async () => {
+  const { env } = sandbox();
+  setPassword(env, "correct-horse");
+  const { port } = await start({ ...env, BIND_HOST: "127.0.0.1" });
+
+  // The Host header check used to guard only the no-password path, so once a
+  // password was set any Host header was accepted. An attacker who points a
+  // domain at 127.0.0.1 then gets same-origin fetch() from a page they serve,
+  // mints a guest token through the passwordless /api/guest, and reads live run
+  // state, prompts and project titles out of the office.
+  const evilHosts = [
+    "rebind.attacker.com",
+    "localtest.me",
+    "127.0.0.1.nip.io",
+    "localhost.evil.com",
+  ];
+  for (const host of evilHosts) {
+    const guest = await request(port, "POST", "/api/guest", { host });
+    assert.equal(guest.status, 503, host + " must not mint a guest token, got " + guest.status);
+
+    const state = await request(port, "GET", "/api/state", { host });
+    assert.equal(state.status, 401, host + " must not read state, got " + state.status);
+
+    const projects = await request(port, "GET", "/api/projects", { host });
+    assert.equal(projects.status, 401, host + " must not read projects, got " + projects.status);
+  }
+
+  // The legitimate local shapes still work.
+  for (const host of ["127.0.0.1:" + port, "localhost:" + port]) {
+    const g = await request(port, "POST", "/api/guest", { host });
+    assert.equal(g.status, 200, host + " should still mint a guest token");
+    assert.equal(g.json.role, "guest");
+  }
+  const o = await request(port, "POST", "/api/auth", { host: "127.0.0.1:" + port, body: { password: "correct-horse" } });
+  assert.equal(o.status, 200);
+  const st = await request(port, "GET", "/api/state", { token: o.json.token, host: "127.0.0.1:" + port });
+  assert.equal(st.status, 200);
+});
+
+test("the no-password open mode still refuses non-local hosts", async () => {
+  const { env } = sandbox();
+  const { port } = await start({ ...env, BIND_HOST: "127.0.0.1" });
+  const remote = await request(port, "POST", "/api/guest", { host: "office.example.com" });
+  assert.equal(remote.status, 503);
+  const local = await request(port, "POST", "/api/guest", { host: "localhost:" + port });
+  assert.equal(local.status, 200);
+  assert.equal(local.json.role, "owner");
+});
+
+test("oversized bodies are refused on the remaining POST routes", async () => {
+  const { env } = sandbox();
+  setPassword(env, "correct-horse");
+  const { port } = await start({ ...env, BIND_HOST: "127.0.0.1" });
+  const o = await request(port, "POST", "/api/auth", { host: "127.0.0.1:" + port, body: { password: "correct-horse" } });
+  const token = o.json.token;
+  const host = "127.0.0.1:" + port;
+
+  // /api/projects caps each field, but the raw body used to be buffered whole
+  // first, so a 10 MB request was read into memory before those limits ran.
+  const bigProject = { title: "x", prompt: "A".repeat(10 * 1024 * 1024) };
+  const p = await request(port, "POST", "/api/projects", { token, host, body: JSON.stringify(bigProject) });
+  assert.equal(p.status, 413);
+  assert.equal((await request(port, "GET", "/api/projects", { token, host })).json.length, 0);
+
+  // A legitimate project still goes through.
+  const ok = await request(port, "POST", "/api/projects", { token, host, body: { title: "real", prompt: "build it" } });
+  assert.equal(ok.status, 201);
+});
