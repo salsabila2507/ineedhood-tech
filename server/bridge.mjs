@@ -96,15 +96,30 @@ const LOOPBACK_BIND = isLoopbackHost(BIND_HOST);
 // The Host header the browser used. Without a password the bridge only answers
 // requests addressed to localhost, which blocks DNS rebinding and a tunnel or
 // reverse proxy that would otherwise publish the open bridge to the internet.
+//
+// The same check has to run in password mode. A password stops a stranger from
+// driving the bridge, but it does nothing about *where* the request came from:
+// an attacker who points a domain at 127.0.0.1 and serves a page from it gets
+// same-origin fetch() against the bridge, mints a guest token through
+// /api/guest (which needs no password), and reads live run state, prompts and
+// project titles out of the office. Refusing non-local Host headers closes that
+// path whether or not a password is set.
 function hostHeaderIsLocal(req) {
   const raw = String(req.headers.host || "").trim().toLowerCase();
   const name = raw.startsWith("[") ? raw.slice(0, raw.indexOf("]") + 1) : raw.split(":")[0];
   return isLoopbackHost(name);
 }
 
-// No password: allowed only when bound to loopback and addressed as localhost.
-function openModeAllowed(req) {
-  return LOOPBACK_BIND && hostHeaderIsLocal(req);
+// Loopback bind plus a local Host header is the only shape a browser may reach
+// directly. On a loopback bind the Host header must be local, which is what
+// stops DNS rebinding. On a public bind the Host header is whatever the client
+// sent, so the check cannot be applied there and the password is the only gate.
+// Set BRIDGE_ALLOW_REMOTE_HOST=1 to skip the check on a loopback bind, for the
+// documented tunnel/reverse-proxy setup where the Host header is a real domain.
+function hostAllowed(req) {
+  if (!LOOPBACK_BIND) return true;
+  if (process.env.BRIDGE_ALLOW_REMOTE_HOST === "1") return true;
+  return hostHeaderIsLocal(req);
 }
 function checkPassword(password) {
   const a = readAuth();
@@ -116,10 +131,11 @@ function checkPassword(password) {
 }
 function sessionOf(req) {
   const auth = readAuth();
-  // No password set. Fail closed unless this is the loopback-only open mode.
-  // Even then a token from /api/guest is required, so a random web page cannot
-  // drive the bridge through the browser with a blind cross-site POST.
-  if (!auth && !openModeAllowed(req)) return null;
+  // Fail closed unless this is the loopback-only open mode, or a password is
+  // set AND the request arrived on a local Host header. The Host check is what
+  // stops DNS rebinding in password mode; without it a page served from a
+  // domain pointed at 127.0.0.1 can mint a guest token and read the office.
+  if (!hostAllowed(req)) return null;
   const live = (t) => {
     const s = t ? sessions.get(t) : null;
     if (!s || s.exp <= Date.now()) return null;
@@ -242,6 +258,9 @@ function projectSummary(p) {
 }
 
 const clients = new Set();
+// SSE fan-out ceiling. A single owner plus a few shared view-only links never
+// needs more than this; anything past it is a client that will not close.
+const SSE_CLIENT_MAX = 64;
 let state = { runId: null, prompt: "", status: "idle", startedAt: null, finishedAt: null, tasks: [], error: null, mode: "live", projectId: null };
 
 function emit(ev) {
@@ -698,13 +717,24 @@ function scopeDir(q) {
   try { return fs.statSync(real).isDirectory() ? real : null; } catch { return null; }
 }
 
+// Artifact reads must not follow symlinks. statSync resolves them, so a link
+// planted inside a run directory (runs/<id>/<agent>/passwd -> /etc/passwd)
+// turned /api/file into an arbitrary file read for the owner token and
+// /api/files into a listing of anything on the box. lstatSync sees the link
+// itself, so it is refused before the target is ever opened.
 function safeFile(dir, agent, name) {
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(agent) || !/^[A-Za-z0-9._-]{1,120}$/.test(name)) return null;
   const full = path.resolve(dir, agent, name);
   if (!full.startsWith(dir + path.sep)) return null;
   try {
-    const st = fs.statSync(full);
-    return st.isFile() && st.size <= ARTIFACT_MAX ? full : null;
+    const lst = fs.lstatSync(full);
+    if (!lst.isFile() || lst.size > ARTIFACT_MAX) return null;
+    // A hard link outside the workspace has the same inode as its target, so
+    // also require the resolved path to stay under the run directory.
+    const real = fs.realpathSync(full);
+    const root = fs.realpathSync(dir);
+    if (real !== root && !real.startsWith(root + path.sep)) return null;
+    return full;
   } catch { return null; }
 }
 
@@ -713,14 +743,15 @@ function listArtifacts(dir) {
   for (const agent of fs.readdirSync(dir)) {
     if (agent.startsWith(".")) continue;
     const sub = path.join(dir, agent);
-    let st;
-    try { st = fs.statSync(sub); } catch { continue; }
-    if (!st.isDirectory()) continue;
+    let lst;
+    try { lst = fs.lstatSync(sub); } catch { continue; }
+    // A symlinked agent directory would otherwise list the whole target tree.
+    if (!lst.isDirectory()) continue;
     for (const name of fs.readdirSync(sub)) {
       if (name.startsWith(".")) continue;
       const file = safeFile(dir, agent, name);
       if (!file) continue;
-      const s = fs.statSync(file);
+      const s = fs.lstatSync(file);
       out.push({ agent, name, size: s.size, mtime: s.mtimeMs });
     }
   }
@@ -801,14 +832,14 @@ function handle(req, res) {
   // A guest link needs no password. It hands out a read only session, which is
   // exactly what someone who just wants to watch the office needs.
   if (url === "/api/guest" && req.method === "POST") {
+    // /api/guest needs no password, so it is the one route a rebinding page can
+    // always reach. It only answers on a local Host header.
+    if (!hostAllowed(req)) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end('{"error":"host not allowed"}');
+      return;
+    }
     if (!readAuth()) {
-      if (!openModeAllowed(req)) {
-        // No password and not a localhost request: refuse rather than hand
-        // out an owner session to the network.
-        res.writeHead(503, { "Content-Type": "application/json" });
-        res.end('{"error":"no password set; run node server/set-pass.mjs <password>"}');
-        return;
-      }
       // Open localhost mode: nothing to protect, so this is an owner session.
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, token: newSession("owner", { open: true }), role: "owner" }));
@@ -843,6 +874,14 @@ function handle(req, res) {
     return;
   }
   if (url === "/api/stream") {
+    // One browser tab per device is the normal case. Without a cap a script
+    // that never closes its connection grows the fan-out set until every
+    // state change writes to thousands of dead sockets.
+    if (clients.size >= SSE_CLIENT_MAX) {
+      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "10" });
+      res.end('{"error":"too many live connections"}');
+      return;
+    }
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
     res.write("retry: 2000\n\n");
     res.write("data: " + JSON.stringify({ kind: "hello", ts: Date.now(), ...state }) + "\n\n");
@@ -852,8 +891,21 @@ function handle(req, res) {
   }
   if (url === "/api/task" && req.method === "POST") {
     let body = "";
-    req.on("data", (c) => (body += c));
+    let tooBig = false;
+    // A prompt is a sentence, not a file. Without a cap a multi-megabyte body
+    // is buffered whole and then handed to spawn(), which fails with E2BIG and
+    // kills the run before the planner ever sees it.
+    req.on("data", (c) => {
+      if (tooBig) return;
+      body += c;
+      if (body.length > MAX_MD) tooBig = true;
+    });
     req.on("end", () => {
+      if (tooBig) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end('{"error":"prompt too large (max 200 KB)"}');
+        return;
+      }
       let prompt = "";
       let projectId = "";
       let workdir = "";
@@ -884,8 +936,21 @@ function handle(req, res) {
   }
   if (url === "/api/projects" && req.method === "POST") {
     let body = "";
-    req.on("data", (c) => (body += c));
+    let tooBig = false;
+    // The fields are individually capped below, but the raw body was still
+    // buffered whole first, so a 10 MB request was read into memory before any
+    // of those limits applied. Cap the stream itself.
+    req.on("data", (c) => {
+      if (tooBig) return;
+      body += c;
+      if (body.length > MAX_IMG + MAX_MD + 64 * 1024) tooBig = true;
+    });
     req.on("end", () => {
+      if (tooBig) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end('{"error":"request too large"}');
+        return;
+      }
       let input = {};
       try { input = JSON.parse(body); } catch {}
       const title = String(input.title || "").trim();
@@ -972,8 +1037,20 @@ function handle(req, res) {
   if (url === "/api/image" && req.method === "POST") {
     if (!ENV.IMAGE_KEY) { res.writeHead(503, { "Content-Type": "application/json" }); res.end('{"error":"IMAGE_KEY not configured"}'); return; }
     let body = "";
-    req.on("data", (c) => (body += c));
+    let tooBig = false;
+    // A prompt and a size string. Anything larger is a client bug or a probe,
+    // and this route spends gateway credits, so refuse it before reading it.
+    req.on("data", (c) => {
+      if (tooBig) return;
+      body += c;
+      if (body.length > AUTH_MAX_BODY) tooBig = true;
+    });
     req.on("end", async () => {
+      if (tooBig) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end('{"error":"request too large"}');
+        return;
+      }
       let prompt = "";
       let size = "1024x1024";
       try { const p = JSON.parse(body); prompt = String(p.prompt || ""); size = String(p.size || "1024x1024"); } catch {}
@@ -1028,10 +1105,27 @@ function handle(req, res) {
   }
   if (url === "/api/projects/delete" && req.method === "POST") {
     let body = "";
-    req.on("data", (c) => (body += c));
+    let tooBig = false;
+    req.on("data", (c) => {
+      if (tooBig) return;
+      body += c;
+      if (body.length > AUTH_MAX_BODY) tooBig = true;
+    });
     req.on("end", () => {
+      if (tooBig) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end('{"error":"request too large"}');
+        return;
+      }
       let id = "";
       try { id = String(JSON.parse(body).id || ""); } catch {}
+      // An id that can never exist is answered as a no-op instead of silently
+      // rewriting projects.json, so a typo cannot look like a successful delete.
+      if (id && !readProjects().some((p) => p.id === id)) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end('{"error":"no such project"}');
+        return;
+      }
       const list = readProjects().filter((p) => p.id !== id);
       writeProjects(list);
       res.writeHead(200, { "Content-Type": "application/json" });
