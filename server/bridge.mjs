@@ -242,6 +242,9 @@ function projectSummary(p) {
 }
 
 const clients = new Set();
+// SSE fan-out ceiling. A single owner plus a few shared view-only links never
+// needs more than this; anything past it is a client that will not close.
+const SSE_CLIENT_MAX = 64;
 let state = { runId: null, prompt: "", status: "idle", startedAt: null, finishedAt: null, tasks: [], error: null, mode: "live", projectId: null };
 
 function emit(ev) {
@@ -698,13 +701,24 @@ function scopeDir(q) {
   try { return fs.statSync(real).isDirectory() ? real : null; } catch { return null; }
 }
 
+// Artifact reads must not follow symlinks. statSync resolves them, so a link
+// planted inside a run directory (runs/<id>/<agent>/passwd -> /etc/passwd)
+// turned /api/file into an arbitrary file read for the owner token and
+// /api/files into a listing of anything on the box. lstatSync sees the link
+// itself, so it is refused before the target is ever opened.
 function safeFile(dir, agent, name) {
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(agent) || !/^[A-Za-z0-9._-]{1,120}$/.test(name)) return null;
   const full = path.resolve(dir, agent, name);
   if (!full.startsWith(dir + path.sep)) return null;
   try {
-    const st = fs.statSync(full);
-    return st.isFile() && st.size <= ARTIFACT_MAX ? full : null;
+    const lst = fs.lstatSync(full);
+    if (!lst.isFile() || lst.size > ARTIFACT_MAX) return null;
+    // A hard link outside the workspace has the same inode as its target, so
+    // also require the resolved path to stay under the run directory.
+    const real = fs.realpathSync(full);
+    const root = fs.realpathSync(dir);
+    if (real !== root && !real.startsWith(root + path.sep)) return null;
+    return full;
   } catch { return null; }
 }
 
@@ -713,14 +727,15 @@ function listArtifacts(dir) {
   for (const agent of fs.readdirSync(dir)) {
     if (agent.startsWith(".")) continue;
     const sub = path.join(dir, agent);
-    let st;
-    try { st = fs.statSync(sub); } catch { continue; }
-    if (!st.isDirectory()) continue;
+    let lst;
+    try { lst = fs.lstatSync(sub); } catch { continue; }
+    // A symlinked agent directory would otherwise list the whole target tree.
+    if (!lst.isDirectory()) continue;
     for (const name of fs.readdirSync(sub)) {
       if (name.startsWith(".")) continue;
       const file = safeFile(dir, agent, name);
       if (!file) continue;
-      const s = fs.statSync(file);
+      const s = fs.lstatSync(file);
       out.push({ agent, name, size: s.size, mtime: s.mtimeMs });
     }
   }
@@ -843,6 +858,14 @@ function handle(req, res) {
     return;
   }
   if (url === "/api/stream") {
+    // One browser tab per device is the normal case. Without a cap a script
+    // that never closes its connection grows the fan-out set until every
+    // state change writes to thousands of dead sockets.
+    if (clients.size >= SSE_CLIENT_MAX) {
+      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "10" });
+      res.end('{"error":"too many live connections"}');
+      return;
+    }
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
     res.write("retry: 2000\n\n");
     res.write("data: " + JSON.stringify({ kind: "hello", ts: Date.now(), ...state }) + "\n\n");
@@ -852,8 +875,21 @@ function handle(req, res) {
   }
   if (url === "/api/task" && req.method === "POST") {
     let body = "";
-    req.on("data", (c) => (body += c));
+    let tooBig = false;
+    // A prompt is a sentence, not a file. Without a cap a multi-megabyte body
+    // is buffered whole and then handed to spawn(), which fails with E2BIG and
+    // kills the run before the planner ever sees it.
+    req.on("data", (c) => {
+      if (tooBig) return;
+      body += c;
+      if (body.length > MAX_MD) tooBig = true;
+    });
     req.on("end", () => {
+      if (tooBig) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end('{"error":"prompt too large (max 200 KB)"}');
+        return;
+      }
       let prompt = "";
       let projectId = "";
       let workdir = "";
@@ -1028,10 +1064,27 @@ function handle(req, res) {
   }
   if (url === "/api/projects/delete" && req.method === "POST") {
     let body = "";
-    req.on("data", (c) => (body += c));
+    let tooBig = false;
+    req.on("data", (c) => {
+      if (tooBig) return;
+      body += c;
+      if (body.length > AUTH_MAX_BODY) tooBig = true;
+    });
     req.on("end", () => {
+      if (tooBig) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end('{"error":"request too large"}');
+        return;
+      }
       let id = "";
       try { id = String(JSON.parse(body).id || ""); } catch {}
+      // An id that can never exist is answered as a no-op instead of silently
+      // rewriting projects.json, so a typo cannot look like a successful delete.
+      if (id && !readProjects().some((p) => p.id === id)) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end('{"error":"no such project"}');
+        return;
+      }
       const list = readProjects().filter((p) => p.id !== id);
       writeProjects(list);
       res.writeHead(200, { "Content-Type": "application/json" });

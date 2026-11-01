@@ -188,3 +188,101 @@ test("a malformed URL does not crash the bridge", async () => {
   assert.equal(bad.status, 400);
   assert.equal((await request(port, "GET", "/health")).status, 200);
 });
+
+test("artifact reads do not follow symlinks out of the run directory", async () => {
+  const { env, dir } = sandbox();
+  setPassword(env, "correct-horse");
+  const { port } = await start({ ...env, BIND_HOST: "127.0.0.1" });
+  const o = await request(port, "POST", "/api/auth", { body: { password: "correct-horse" } });
+  const token = o.json.token;
+
+  // A real artifact the owner is allowed to read.
+  const runDir = path.join(dir, "runs", "run_sym");
+  const agentDir = path.join(runDir, "developer");
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.writeFileSync(path.join(agentDir, "index.html"), "<h1>real</h1>");
+
+  // A symlinked file and a symlinked agent directory, both pointing outside.
+  fs.symlinkSync("/etc/passwd", path.join(agentDir, "passwd"));
+  fs.symlinkSync("/etc", path.join(runDir, "etc"));
+
+  const ok = await request(port, "GET", "/api/file?kind=run&id=run_sym&agent=developer&name=index.html", { token });
+  assert.equal(ok.status, 200);
+  assert.match(ok.body, /real/);
+
+  for (const p of [
+    "/api/file?kind=run&id=run_sym&agent=developer&name=passwd",
+    "/api/file?kind=run&id=run_sym&agent=etc&name=passwd",
+    "/api/file?kind=run&id=run_sym&agent=..%2F..%2Fetc&name=passwd",
+  ]) {
+    const r = await request(port, "GET", p, { token });
+    assert.equal(r.status, 404, p + " must not escape the run directory, got " + r.status);
+  }
+
+  // The listing must not walk into the symlinked directory either.
+  const list = await request(port, "GET", "/api/files?kind=run&id=run_sym", { token });
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.json.files.map((f) => f.name), ["index.html"]);
+});
+
+test("a huge prompt is refused instead of killing the run", async () => {
+  const { env } = sandbox();
+  setPassword(env, "correct-horse");
+  const { port } = await start({ ...env, BIND_HOST: "127.0.0.1" });
+  const o = await request(port, "POST", "/api/auth", { body: { password: "correct-horse" } });
+  const token = o.json.token;
+
+  // 5 MB is far past the cap. Before the cap this was buffered whole and then
+  // handed to spawn(), which failed with E2BIG after the run had started.
+  const huge = "A".repeat(5 * 1024 * 1024);
+  const r = await request(port, "POST", "/api/task", { token, body: { prompt: huge } });
+  assert.equal(r.status, 413);
+  const st = await request(port, "GET", "/api/state", { token });
+  assert.equal(st.json.status, "idle", "a refused prompt must not start a run");
+
+  // A normal prompt is still accepted (it fails later at planning, which is
+  // the honest answer when the agent binaries are missing).
+  const small = await request(port, "POST", "/api/task", { token, body: { prompt: "build a page" } });
+  assert.equal(small.status, 202);
+});
+
+test("deleting an unknown project is a 404, not a silent rewrite", async () => {
+  const { env } = sandbox();
+  setPassword(env, "correct-horse");
+  const { port } = await start({ ...env, BIND_HOST: "127.0.0.1" });
+  const o = await request(port, "POST", "/api/auth", { body: { password: "correct-horse" } });
+  const token = o.json.token;
+
+  const created = await request(port, "POST", "/api/projects", { token, body: { title: "keep me", prompt: "p" } });
+  assert.equal(created.status, 201);
+
+  const miss = await request(port, "POST", "/api/projects/delete", { token, body: { id: "p_nope" } });
+  assert.equal(miss.status, 404);
+
+  const list = await request(port, "GET", "/api/projects", { token });
+  assert.equal(list.json.length, 1, "an unknown id must not touch the project list");
+
+  const del = await request(port, "POST", "/api/projects/delete", { token, body: { id: created.json.id } });
+  assert.equal(del.status, 200);
+  assert.equal((await request(port, "GET", "/api/projects", { token })).json.length, 0);
+});
+
+test("the SSE feed stops accepting connections past its ceiling", async () => {
+  const { env } = sandbox();
+  setPassword(env, "correct-horse");
+  const { port } = await start({ ...env, BIND_HOST: "127.0.0.1" });
+  const o = await request(port, "POST", "/api/auth", { body: { password: "correct-horse" } });
+  const token = o.json.token;
+
+  // Hold 64 sockets open, then the 65th must be refused.
+  const held = [];
+  for (let i = 0; i < 64; i++) {
+    const req = http.request({ host: "127.0.0.1", port, method: "GET", path: "/api/stream", headers: { "x-0xyas-token": token } });
+    held.push(req);
+    req.end();
+  }
+  await new Promise((r) => setTimeout(r, 400));
+  const extra = await request(port, "GET", "/api/stream", { token });
+  assert.equal(extra.status, 429);
+  for (const req of held) req.destroy();
+});
