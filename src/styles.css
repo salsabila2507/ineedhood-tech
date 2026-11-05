@@ -1635,93 +1635,6 @@ button {
   }
 }
 
-@media (max-width: 1360px) {
-  .bottom {
-    right: 16px;
-  }
-  .cmd-panel {
-    width: 340px;
-  }
-}
-
-@media (max-width: 1200px) {
-  .rightcol {
-    width: 280px;
-  }
-  .only-narrow {
-    display: inline-flex;
-  }
-}
-
-@media (max-width: 1120px) {
-  .rightcol {
-    display: none;
-  }
-  .bottom {
-    right: 16px;
-    left: 232px;
-  }
-  .app.no-panels .rightcol {
-    display: flex;
-    width: 280px;
-    position: absolute;
-    right: 16px;
-    top: 60px;
-    max-height: calc(100vh - 200px);
-    overflow-y: auto;
-  }
-}
-
-@media (max-width: 900px) {
-  .sidebar {
-    width: 64px;
-    padding: 16px 10px;
-    align-items: center;
-  }
-  .brand-text,
-  .nav-item span,
-  .nav-item em,
-  .side-foot {
-    display: none;
-  }
-  .nav-item {
-    justify-content: center;
-    padding: 10px;
-  }
-  .statusbar,
-  .bottom {
-    left: 78px;
-  }
-  .view-layer {
-    left: 64px;
-  }
-  .flow-panel {
-    display: none;
-  }
-}
-
-@media (max-width: 700px) {
-  .bottom {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .cmd-panel {
-    width: auto;
-  }
-  .task-board {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .modal-stats {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  * {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
-  }
-}
 
 .hint {
   color: #7c7594;
@@ -2777,4 +2690,102 @@ html[data-reduced="1"] .gate-card {
 
 .guest-badge {
   margin: 9px 3px 2px;
+}
+
+/* ============================================================
+   RESPONSIVE
+   These rules have to come last. The theme blocks above restyle
+   the same selectors at the same specificity, so a media query
+   that sits above them loses the cascade and never applies. The
+   sidebar is the worst case: a later `.sidebar { width: 216px }`
+   silently replaced the narrow rail this block asks for, and on
+   a phone the sidebar covered more than half the screen.
+   ============================================================ */
+
+@media (max-width: 1360px) {
+  .bottom {
+    right: 16px;
+  }
+  .cmd-panel {
+    width: 340px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .rightcol {
+    width: 280px;
+  }
+  .only-narrow {
+    display: inline-flex;
+  }
+}
+
+@media (max-width: 1120px) {
+  .rightcol {
+    display: none;
+  }
+  .bottom {
+    right: 16px;
+    left: 232px;
+  }
+  .app.no-panels .rightcol {
+    display: flex;
+    width: 280px;
+    position: absolute;
+    right: 16px;
+    top: 60px;
+    max-height: calc(100vh - 200px);
+    overflow-y: auto;
+  }
+}
+
+@media (max-width: 900px) {
+  .sidebar {
+    width: 64px;
+    padding: 16px 10px;
+    align-items: center;
+  }
+  .brand-text,
+  .nav-item span,
+  .nav-item em,
+  .side-foot {
+    display: none;
+  }
+  .nav-item {
+    justify-content: center;
+    padding: 10px;
+  }
+  .statusbar,
+  .bottom {
+    left: 78px;
+  }
+  .view-layer {
+    left: 64px;
+  }
+  .flow-panel {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .bottom {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .cmd-panel {
+    width: auto;
+  }
+  .task-board {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .modal-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
