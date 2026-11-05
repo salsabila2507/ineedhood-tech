@@ -31,6 +31,8 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+  /* No pull-to-refresh over the office on a phone. */
+  overscroll-behavior: none;
 }
 
 button {
@@ -61,6 +63,12 @@ button {
   height: 100%;
   display: block;
   cursor: grab;
+  /* The camera owns every gesture on the canvas. Without this the browser
+     takes a drag over to scrolling, fires pointercancel and the camera keeps
+     orbiting from stale coordinates. */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .scene-canvas:active {
